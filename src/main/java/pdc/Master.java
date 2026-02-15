@@ -516,6 +516,34 @@ public class Master {
     }
 
     /**
+     * Main method to start the master server.
+     */
+    public static void main(String[] args) {
+        try {
+            int port = 9999; // Default port
+            if (args.length > 0) {
+                port = Integer.parseInt(args[0]);
+            }
+            
+            Master master = new Master();
+            
+            // Add shutdown hook
+            Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+                System.out.println("Shutting down master...");
+                master.shutdown();
+            }));
+            
+            System.out.println("Starting Master on port " + port);
+            master.listen(port);
+            
+        } catch (Exception e) {
+            System.err.println("Master failed to start: " + e.getMessage());
+            e.printStackTrace();
+            System.exit(1);
+        }
+    }
+
+    /**
      * Inner class to represent a worker connection.
      */
     private static class WorkerConnection {

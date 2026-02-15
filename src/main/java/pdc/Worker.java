@@ -320,4 +320,58 @@ public class Worker {
     public void stop() {
         cleanup();
     }
+
+    /**
+     * Main method to start a worker.
+     */
+    public static void main(String[] args) {
+        try {
+            String workerId = "worker-" + System.currentTimeMillis();
+            String masterHost = "localhost";
+            int masterPort = 9999;
+            
+            // Parse command line arguments
+            if (args.length >= 1) {
+                workerId = args[0];
+            }
+            if (args.length >= 2) {
+                masterHost = args[1];
+            }
+            if (args.length >= 3) {
+                masterPort = Integer.parseInt(args[2]);
+            }
+            
+            // Check environment variables
+            String envWorkerId = System.getenv("WORKER_ID");
+            String envMasterHost = System.getenv("MASTER_HOST");
+            String envMasterPort = System.getenv("MASTER_PORT");
+            
+            if (envWorkerId != null) {
+                workerId = envWorkerId;
+            }
+            if (envMasterHost != null) {
+                masterHost = envMasterHost;
+            }
+            if (envMasterPort != null) {
+                masterPort = Integer.parseInt(envMasterPort);
+            }
+            
+            Worker worker = new Worker(workerId, masterHost, masterPort);
+            final String finalWorkerId = workerId; // Make it effectively final
+            
+            // Add shutdown hook
+            Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+                System.out.println("Shutting down worker " + finalWorkerId + "...");
+                worker.stop();
+            }));
+            
+            System.out.println("Starting worker " + workerId + " connecting to " + masterHost + ":" + masterPort);
+            worker.start();
+            
+        } catch (Exception e) {
+            System.err.println("Worker failed to start: " + e.getMessage());
+            e.printStackTrace();
+            System.exit(1);
+        }
+    }
 }
