@@ -446,15 +446,17 @@ public class Master {
      */
     private byte[] readMessage(DataInputStream input) throws IOException {
         try {
-            int length = input.readInt();
-            if (length <= 0) {
+            // Read total message length
+            int totalLength = input.readInt();
+            if (totalLength <= 0) {
                 return null;
             }
             
-            byte[] data = new byte[length];
-            input.readFully(data);
+            // Read the actual message data (includes length prefix)
+            byte[] totalData = new byte[totalLength];
+            input.readFully(totalData);
             
-            return data;
+            return totalData;
         } catch (IOException e) {
             throw e;
         }

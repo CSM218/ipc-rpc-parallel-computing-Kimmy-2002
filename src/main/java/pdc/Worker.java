@@ -168,17 +168,19 @@ public class Worker {
         long startTime = System.currentTimeMillis();
         
         try {
-            // Parse task data (simplified - expecting matrix multiplication task)
+            // Parse task data (expecting matrix multiplication task)
             String taskString = new String(taskData);
             String[] parts = taskString.split(":");
             
-            if (parts.length < 3) {
-                throw new IllegalArgumentException("Invalid task format");
+            if (parts.length < 5) {
+                throw new IllegalArgumentException("Invalid task format: expected at least 5 parts, got " + parts.length);
             }
             
             String operation = parts[0];
             int matrixSize = Integer.parseInt(parts[1]);
-            int seed = Integer.parseInt(parts[2]);
+            int startRow = Integer.parseInt(parts[2]);
+            int endRow = Integer.parseInt(parts[3]);
+            int seed = Integer.parseInt(parts[4]);
             
             if ("BLOCK_MULTIPLY".equals(operation)) {
                 // Generate test matrices and perform multiplication
@@ -186,12 +188,19 @@ public class Worker {
                 int[][] matrixB = MatrixGenerator.generateRandomMatrix(matrixSize, matrixSize, seed + 1);
                 int[][] result = multiplyMatrices(matrixA, matrixB);
                 
-                long endTime = System.currentTimeMillis();
-                System.out.println("Worker " + workerId + " completed " + matrixSize + "x" + matrixSize + 
-                                 " multiplication in " + (endTime - startTime) + "ms");
+                // Extract the rows that this worker is responsible for
+                int blockHeight = endRow - startRow;
+                int[][] blockResult = new int[blockHeight][matrixSize];
+                for (int i = 0; i < blockHeight; i++) {
+                    System.arraycopy(result[startRow + i], 0, blockResult[i], 0, matrixSize);
+                }
                 
-                // Serialize result
-                return serializeMatrix(result);
+                long endTime = System.currentTimeMillis();
+                System.out.println("Worker " + workerId + " completed block [" + startRow + "-" + endRow + 
+                                 "] of " + matrixSize + "x" + matrixSize + " multiplication in " + (endTime - startTime) + "ms");
+                
+                // Serialize block result
+                return serializeMatrix(blockResult);
             } else {
                 throw new UnsupportedOperationException("Unknown operation: " + operation);
             }
@@ -266,17 +275,17 @@ public class Worker {
      */
     private byte[] readMessage() throws IOException {
         try {
-            // Read message length
-            int length = input.readInt();
-            if (length <= 0) {
+            // Read total message length
+            int totalLength = input.readInt();
+            if (totalLength <= 0) {
                 return null;
             }
             
-            // Read message data
-            byte[] data = new byte[length];
-            input.readFully(data);
+            // Read the actual message data (includes length prefix)
+            byte[] totalData = new byte[totalLength];
+            input.readFully(totalData);
             
-            return data;
+            return totalData;
         } catch (IOException e) {
             running.set(false);
             throw e;

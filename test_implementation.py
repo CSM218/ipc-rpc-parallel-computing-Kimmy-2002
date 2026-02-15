@@ -51,12 +51,15 @@ def test_master_worker_basic():
     """Test basic master-worker functionality"""
     print("\n=== Testing Master-Worker Basic Functionality ===")
     
+    # Use a different port to avoid conflicts
+    test_port = 12345
+    
     # Start master in background
-    master_cmd = "java -cp build/classes pdc.Master"
+    master_cmd = f"java -cp build/classes pdc.Master {test_port}"
     master_proc = subprocess.Popen(master_cmd.split(), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     
     # Give master time to start
-    time.sleep(2)
+    time.sleep(3)
     
     # Check if master is still running (should be listening)
     if master_proc.poll() is None:
