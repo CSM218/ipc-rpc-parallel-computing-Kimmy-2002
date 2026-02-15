@@ -7,7 +7,6 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -95,6 +94,7 @@ public class Master {
         }
 
         // Wait for all tasks to complete with timeout
+        @SuppressWarnings("rawtypes")
         CompletableFuture<Void> allTasks = CompletableFuture.allOf(
             futures.toArray(new CompletableFuture[0])
         );
@@ -172,7 +172,11 @@ public class Master {
 
         // Wait for reassigned tasks
         try {
-            CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).get(15, TimeUnit.SECONDS);
+            @SuppressWarnings("rawtypes")
+            CompletableFuture<Void> allReassignedTasks = CompletableFuture.allOf(
+                futures.toArray(new CompletableFuture[0])
+            );
+            allReassignedTasks.get(15, TimeUnit.SECONDS);
             return aggregateResults(futures, matrixSize, blockSize);
         } catch (Exception e) {
             throw new RuntimeException("Failed to complete even after reassignment", e);
