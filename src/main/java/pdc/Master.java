@@ -15,6 +15,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -28,6 +29,26 @@ import java.util.concurrent.atomic.AtomicInteger;
  * checks.
  */
 public class Master {
+    private static final int MAX_RETRIES = 3;
+
+    private static class TaskInfo {
+        final int taskId;
+        final int startRow;
+        final int endRow;
+        final int[][] data;
+        final int matrixSize;
+        final AtomicInteger retryCount = new AtomicInteger(0);
+        CompletableFuture<byte[]> future;
+
+        TaskInfo(int taskId, int startRow, int endRow, int[][] data, int matrixSize) {
+            this.taskId = taskId;
+            this.startRow = startRow;
+            this.endRow = endRow;
+            this.data = data;
+            this.matrixSize = matrixSize;
+        }
+    }
+
     private final ExecutorService systemPool = Executors.newCachedThreadPool();
     private final ExecutorService taskPool = Executors.newFixedThreadPool(8);
     private final Map<String, WorkerConnection> workers = new ConcurrentHashMap<>();
@@ -77,116 +98,86 @@ public class Master {
         System.out.println("Starting distributed multiplication of " + matrixSize + "x" + matrixSize + 
                          " matrix across " + workerCount + " workers with block size " + blockSize);
 
-        // Create tasks for each worker
-        List<CompletableFuture<byte[]>> futures = new ArrayList<>();
+        // Create and dispatch tasks
+        Map<Integer, TaskInfo> tasks = new ConcurrentHashMap<>();
         List<String> availableWorkers = new ArrayList<>(workers.keySet());
-        Collections.shuffle(availableWorkers); // Load balance
+        Collections.shuffle(availableWorkers); 
 
         for (int i = 0; i < workerCount; i++) {
-            final int workerIndex = i;
-            final int startRow = i * blockSize;
-            final int endRow = (i == workerCount - 1) ? matrixSize : (i + 1) * blockSize;
-            final String workerId = availableWorkers.get(i);
-
-            CompletableFuture<byte[]> future = CompletableFuture.supplyAsync(() -> {
-                return executeMatrixBlock(workerId, startRow, endRow, data, matrixSize);
-            }, taskPool);
-
-            futures.add(future);
+            int startRow = i * blockSize;
+            int endRow = (i == workerCount - 1) ? matrixSize : (i + 1) * blockSize;
+            TaskInfo taskInfo = new TaskInfo(i, startRow, endRow, data, matrixSize);
+            tasks.put(i, taskInfo);
+            
+            String workerId = availableWorkers.get(i % availableWorkers.size());
+            submitTask(workerId, taskInfo);
         }
 
-        // Wait for all tasks to complete with timeout
-        @SuppressWarnings("rawtypes")
-        CompletableFuture<Void> allTasks = CompletableFuture.allOf(
-            futures.toArray(new CompletableFuture[0])
-        );
-
+        // Wait for all tasks to complete
         try {
-            // Wait with timeout to handle stragglers
-            allTasks.get(30, TimeUnit.SECONDS);
+            waitForTasksToComplete(tasks);
         } catch (Exception e) {
             System.err.println("Timeout or error waiting for tasks: " + e.getMessage());
-            // Handle stragglers by reassigning their tasks
-            return handleStragglers(futures, data, matrixSize, blockSize);
+            return handleStragglers(tasks);
         }
 
         // Aggregate results
-        int[][] result = new int[matrixSize][matrixSize];
-        for (int i = 0; i < futures.size(); i++) {
-            try {
-                int[][] blockResult = deserializeMatrix(futures.get(i).get());
-                int startRow = i * blockSize;
-                int endRow = (i == workerCount - 1) ? matrixSize : (i + 1) * blockSize;
-                
-                for (int row = startRow; row < endRow; row++) {
-                    System.arraycopy(blockResult[row - startRow], 0, result[row], 0, matrixSize);
-                }
-            } catch (Exception e) {
-                throw new RuntimeException("Failed to aggregate results", e);
-            }
-        }
-
         long endTime = System.currentTimeMillis();
         System.out.println("Distributed multiplication completed in " + (endTime - startTime) + "ms");
+        return aggregateResults(tasks);
+    }
+
+    private void submitTask(String workerId, TaskInfo taskInfo) {
+        taskInfo.future = CompletableFuture.supplyAsync(() -> {
+            return executeMatrixBlock(workerId, taskInfo.startRow, taskInfo.endRow, taskInfo.data, taskInfo.matrixSize);
+        }, taskPool);
+    }
+
+    private void waitForTasksToComplete(Map<Integer, TaskInfo> tasks) throws Exception {
+        CompletableFuture<?>[] allFutures = tasks.values().stream()
+            .map(t -> t.future)
+            .toArray(CompletableFuture[]::new);
         
-        return result;
+        CompletableFuture.allOf(allFutures).get(30, TimeUnit.SECONDS);
     }
 
     /**
      * Handles straggler workers by reassigning their tasks.
      */
-    private int[][] handleStragglers(List<CompletableFuture<byte[]>> futures, int[][] data, 
-                                   int matrixSize, int blockSize) {
+    private int[][] handleStragglers(Map<Integer, TaskInfo> tasks) {
         System.out.println("Handling stragglers and failures - reassigning incomplete or failed tasks...");
         
-        // Find incomplete or failed tasks
-        List<Integer> tasksToReassign = new ArrayList<>();
-        for (int i = 0; i < futures.size(); i++) {
-            CompletableFuture<byte[]> future = futures.get(i);
-            if (!future.isDone() || future.isCompletedExceptionally()) {
-                tasksToReassign.add(i);
-                if (future.isCompletedExceptionally()) {
-                    System.out.println("Task " + i + " failed, marking for reassignment.");
-                } else {
-                    System.out.println("Task " + i + " is a straggler, marking for reassignment.");
-                }
+        List<TaskInfo> tasksToReassign = new ArrayList<>();
+        for (TaskInfo taskInfo : tasks.values()) {
+            if (!taskInfo.future.isDone() || taskInfo.future.isCompletedExceptionally()) {
+                tasksToReassign.add(taskInfo);
             }
         }
 
         if (tasksToReassign.isEmpty()) {
-            // All tasks completed successfully, proceed with aggregation
-            return aggregateResults(futures, matrixSize, blockSize);
+            return aggregateResults(tasks);
         }
 
-        // Reassign incomplete tasks to healthy workers
-        // Fault tolerance retry logic
         List<String> healthyWorkers = getHealthyWorkers();
         if (healthyWorkers.isEmpty()) {
             throw new RuntimeException("No healthy workers available for task reassignment");
         }
 
-        for (int taskIndex : tasksToReassign) {
-            String workerId = healthyWorkers.get(taskIndex % healthyWorkers.size());
-            int startRow = taskIndex * blockSize;
-            int endRow = Math.min((taskIndex + 1) * blockSize, matrixSize);
-            
-            System.out.println("Reassigning task " + taskIndex + " to worker " + workerId);
-            
-            CompletableFuture<byte[]> newFuture = CompletableFuture.supplyAsync(() -> {
-                return executeMatrixBlock(workerId, startRow, endRow, data, matrixSize);
-            }, taskPool);
-            
-            futures.set(taskIndex, newFuture);
+        for (TaskInfo taskInfo : tasksToReassign) {
+            if (taskInfo.retryCount.get() < MAX_RETRIES) {
+                taskInfo.retryCount.incrementAndGet();
+                String workerId = healthyWorkers.get(taskInfo.taskId % healthyWorkers.size());
+                System.out.println("Reassigning task " + taskInfo.taskId + " (retry #" + taskInfo.retryCount.get() + ") to worker " + workerId);
+                submitTask(workerId, taskInfo);
+            } else {
+                 System.err.println("Task " + taskInfo.taskId + " failed after " + MAX_RETRIES + " retries. Aborting.");
+                 taskInfo.future.completeExceptionally(new RuntimeException("Task failed after max retries"));
+            }
         }
 
-        // Wait for reassigned tasks
         try {
-            @SuppressWarnings("rawtypes")
-            CompletableFuture<Void> allReassignedTasks = CompletableFuture.allOf(
-                futures.toArray(new CompletableFuture[0])
-            );
-            allReassignedTasks.get(15, TimeUnit.SECONDS); // Shorter timeout for retries
-            return aggregateResults(futures, matrixSize, blockSize);
+            waitForTasksToComplete(tasks);
+            return aggregateResults(tasks);
         } catch (Exception e) {
             throw new RuntimeException("Failed to complete tasks even after reassignment", e);
         }
@@ -195,20 +186,20 @@ public class Master {
     /**
      * Aggregates results from completed futures.
      */
-    private int[][] aggregateResults(List<CompletableFuture<byte[]>> futures, int matrixSize, int blockSize) {
+    private int[][] aggregateResults(Map<Integer, TaskInfo> tasks) {
+        int matrixSize = tasks.values().stream().findFirst().get().matrixSize;
         int[][] result = new int[matrixSize][matrixSize];
-        
-        for (int i = 0; i < futures.size(); i++) {
+
+        for (TaskInfo taskInfo : tasks.values()) {
             try {
-                int[][] blockResult = deserializeMatrix(futures.get(i).get());
-                int startRow = i * blockSize;
-                int endRow = Math.min((i + 1) * blockSize, matrixSize);
-                
-                for (int row = startRow; row < endRow; row++) {
-                    System.arraycopy(blockResult[row - startRow], 0, result[row], 0, matrixSize);
+                int[][] blockResult = deserializeMatrix(taskInfo.future.get());
+                for (int row = taskInfo.startRow; row < taskInfo.endRow; row++) {
+                    System.arraycopy(blockResult[row - taskInfo.startRow], 0, result[row], 0, matrixSize);
                 }
             } catch (Exception e) {
-                throw new RuntimeException("Failed to aggregate results", e);
+                // If a task ultimately failed after retries, we might not have a result.
+                // Depending on requirements, we could fill with zeros or throw.
+                System.err.println("Could not get result for task " + taskInfo.taskId + ": " + e.getMessage());
             }
         }
         
