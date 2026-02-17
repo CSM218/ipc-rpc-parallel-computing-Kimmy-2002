@@ -300,22 +300,7 @@ public class Worker {
      */
     private byte[] readMessage() throws IOException {
         try {
-            // Read message length with timeout
-            int length = input.readInt();
-            if (length <= 0 || length > 1000000) { // Max 1MB message
-                return null;
-            }
-            
-            // Read message data
-            byte[] messageData = new byte[length];
-            input.readFully(messageData);
-            
-            // Prepend the total length for Message.unpack() to skip
-            byte[] completePacket = new byte[length + 4];
-            System.arraycopy(ByteBuffer.allocate(4).putInt(length).array(), 0, completePacket, 0, 4);
-            System.arraycopy(messageData, 0, completePacket, 4, length);
-            
-            return completePacket;
+            return Message.readFramedMessage(input);
         } catch (IOException e) {
             running.set(false);
             throw e;

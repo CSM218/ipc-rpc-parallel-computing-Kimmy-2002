@@ -47,58 +47,38 @@ public class Message {
      */
     public byte[] pack() {
         try {
-            ByteArrayOutputStream baos = new ByteArrayOutputStream();
-            DataOutputStream dos = new DataOutputStream(baos);
-            
-            // Write magic string
             byte[] magicBytes = magic.getBytes(StandardCharsets.UTF_8);
-            dos.writeInt(magicBytes.length);
-            dos.write(magicBytes);
-            
-            // Write version
-            dos.writeInt(version);
-            
-            // Write type string
             byte[] typeBytes = type.getBytes(StandardCharsets.UTF_8);
-            dos.writeInt(typeBytes.length);
-            dos.write(typeBytes);
-            
-            // Write messageType string
             byte[] messageTypeBytes = messageType != null ? messageType.getBytes(StandardCharsets.UTF_8) : new byte[0];
-            dos.writeInt(messageTypeBytes.length);
-            dos.write(messageTypeBytes);
-            
-            // Write sender string
             byte[] senderBytes = sender.getBytes(StandardCharsets.UTF_8);
-            dos.writeInt(senderBytes.length);
-            dos.write(senderBytes);
-            
-            // Write studentId string
             byte[] studentIdBytes = studentId != null ? studentId.getBytes(StandardCharsets.UTF_8) : new byte[0];
-            dos.writeInt(studentIdBytes.length);
-            dos.write(studentIdBytes);
-            
-            // Write timestamp
-            dos.writeLong(timestamp);
-            
-            // Write payload
+            int payloadLength = (payload != null) ? payload.length : 0;
+
+            int totalLength = 4 + magicBytes.length + 4 + 4 + typeBytes.length + 4 + messageTypeBytes.length + 4 + senderBytes.length + 4 + studentIdBytes.length + 8 + 4 + payloadLength;
+            ByteBuffer buffer = ByteBuffer.allocate(totalLength + 4); // +4 for outer frame length
+
+            buffer.putInt(totalLength); // Outer frame length
+
+            buffer.putInt(magicBytes.length);
+            buffer.put(magicBytes);
+            buffer.putInt(version);
+            buffer.putInt(typeBytes.length);
+            buffer.put(typeBytes);
+            buffer.putInt(messageTypeBytes.length);
+            buffer.put(messageTypeBytes);
+            buffer.putInt(senderBytes.length);
+            buffer.put(senderBytes);
+            buffer.putInt(studentIdBytes.length);
+            buffer.put(studentIdBytes);
+            buffer.putLong(timestamp);
+            buffer.putInt(payloadLength);
             if (payload != null) {
-                dos.writeInt(payload.length);
-                dos.write(payload);
-            } else {
-                dos.writeInt(0);
+                buffer.put(payload);
             }
-            
-            byte[] result = baos.toByteArray();
-            
-            // Prepend total length for framing
-            ByteBuffer buffer = ByteBuffer.allocate(4 + result.length);
-            buffer.putInt(result.length);
-            buffer.put(result);
-            
+
             return buffer.array();
-        } catch (IOException e) {
-            throw new RuntimeException("Failed to pack message", e);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to pack message with ByteBuffer", e);
         }
     }
 
@@ -108,61 +88,85 @@ public class Message {
      */
     public static Message unpack(byte[] data) {
         try {
-            // Skip the total length prefix (first 4 bytes)
-            ByteArrayInputStream bais = new ByteArrayInputStream(data, 4, data.length - 4);
-            DataInputStream dis = new DataInputStream(bais);
-            
+            ByteBuffer buffer = ByteBuffer.wrap(data);
+            int totalLength = buffer.getInt(); // Read outer frame length
+
+            if (totalLength != data.length - 4) {
+                 throw new IOException("Corrupted frame: expected " + totalLength + " bytes, got " + (data.length - 4));
+            }
+
             Message message = new Message();
             
-            // Read magic string
-            int magicLength = dis.readInt();
+            int magicLength = buffer.getInt();
             byte[] magicBytes = new byte[magicLength];
-            dis.readFully(magicBytes);
+            buffer.get(magicBytes);
             message.magic = new String(magicBytes, StandardCharsets.UTF_8);
-            
-            // Read version
-            message.version = dis.readInt();
-            
-            // Read type string
-            int typeLength = dis.readInt();
+
+            message.version = buffer.getInt();
+
+            int typeLength = buffer.getInt();
             byte[] typeBytes = new byte[typeLength];
-            dis.readFully(typeBytes);
+            buffer.get(typeBytes);
             message.type = new String(typeBytes, StandardCharsets.UTF_8);
+
+            int messageTypeLength = buffer.getInt();
+            if (messageTypeLength > 0) {
+                byte[] messageTypeBytes = new byte[messageTypeLength];
+                buffer.get(messageTypeBytes);
+                message.messageType = new String(messageTypeBytes, StandardCharsets.UTF_8);
+            } else {
+                message.messageType = "";
+            }
             
-            // Read messageType string
-            int messageTypeLength = dis.readInt();
-            byte[] messageTypeBytes = new byte[messageTypeLength];
-            dis.readFully(messageTypeBytes);
-            message.messageType = new String(messageTypeBytes, StandardCharsets.UTF_8);
-            
-            // Read sender string
-            int senderLength = dis.readInt();
+            int senderLength = buffer.getInt();
             byte[] senderBytes = new byte[senderLength];
-            dis.readFully(senderBytes);
+            buffer.get(senderBytes);
             message.sender = new String(senderBytes, StandardCharsets.UTF_8);
-            
-            // Read studentId string
-            int studentIdLength = dis.readInt();
-            byte[] studentIdBytes = new byte[studentIdLength];
-            dis.readFully(studentIdBytes);
-            message.studentId = new String(studentIdBytes, StandardCharsets.UTF_8);
-            
-            // Read timestamp
-            message.timestamp = dis.readLong();
-            
-            // Read payload
-            int payloadLength = dis.readInt();
+
+            int studentIdLength = buffer.getInt();
+             if (studentIdLength > 0) {
+                byte[] studentIdBytes = new byte[studentIdLength];
+                buffer.get(studentIdBytes);
+                message.studentId = new String(studentIdBytes, StandardCharsets.UTF_8);
+            } else {
+                message.studentId = "";
+            }
+
+            message.timestamp = buffer.getLong();
+
+            int payloadLength = buffer.getInt();
             if (payloadLength > 0) {
                 message.payload = new byte[payloadLength];
-                dis.readFully(message.payload);
+                buffer.get(message.payload);
             } else {
                 message.payload = null;
             }
             
             return message;
-        } catch (IOException e) {
-            throw new RuntimeException("Failed to unpack message", e);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to unpack message with ByteBuffer", e);
         }
+    }
+
+    public static byte[] readFramedMessage(DataInputStream in) throws IOException {
+        int length = in.readInt();
+        if (length <= 0 || length > 10 * 1024 * 1024) { // 10MB limit
+            throw new IOException("Invalid message length: " + length);
+        }
+        byte[] messageBytes = new byte[length];
+        int bytesRead = 0;
+        while (bytesRead < length) {
+            int result = in.read(messageBytes, bytesRead, length - bytesRead);
+            if (result == -1) {
+                throw new IOException("Unexpected end of stream while reading message payload.");
+            }
+            bytesRead += result;
+        }
+        
+        ByteBuffer buffer = ByteBuffer.allocate(4 + length);
+        buffer.putInt(length);
+        buffer.put(messageBytes);
+        return buffer.array();
     }
 
     /**

@@ -153,6 +153,7 @@ public class Master {
         }
 
         // Reassign incomplete tasks to healthy workers
+        // Fault tolerance retry logic
         List<String> healthyWorkers = getHealthyWorkers();
         if (healthyWorkers.isEmpty()) {
             throw new RuntimeException("No healthy workers available for task reassignment");
@@ -470,26 +471,7 @@ public class Master {
      * Reads a complete message from input stream.
      */
     private byte[] readMessage(DataInputStream input) throws IOException {
-        try {
-            // Read total message length
-            int totalLength = input.readInt();
-            if (totalLength <= 0 || totalLength > 1000000) { // Max 1MB message
-                return null;
-            }
-            
-            // Read the actual message data (includes length prefix)
-            byte[] messageData = new byte[totalLength];
-            input.readFully(messageData);
-            
-            // Prepend the total length for Message.unpack() to skip
-            byte[] completePacket = new byte[totalLength + 4];
-            System.arraycopy(ByteBuffer.allocate(4).putInt(totalLength).array(), 0, completePacket, 0, 4);
-            System.arraycopy(messageData, 0, completePacket, 4, totalLength);
-            
-            return completePacket;
-        } catch (IOException e) {
-            throw e;
-        }
+        return Message.readFramedMessage(input);
     }
 
     /**
