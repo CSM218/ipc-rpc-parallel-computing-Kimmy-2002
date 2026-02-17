@@ -5,6 +5,8 @@ import java.io.DataOutputStream;
 import java.io.IOException;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.net.SocketTimeoutException;
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -26,8 +28,8 @@ import java.util.concurrent.atomic.AtomicInteger;
  * checks.
  */
 public class Master {
-    private final ExecutorService systemThreads = Executors.newCachedThreadPool();
-    private final ExecutorService taskExecutor = Executors.newFixedThreadPool(8);
+    private final ExecutorService systemPool = Executors.newCachedThreadPool();
+    private final ExecutorService taskPool = Executors.newFixedThreadPool(8);
     private final Map<String, WorkerConnection> workers = new ConcurrentHashMap<>();
     private final Map<String, CompletableFuture<byte[]>> pendingTasks = new ConcurrentHashMap<>();
     private final AtomicInteger taskIdCounter = new AtomicInteger(0);
@@ -88,7 +90,7 @@ public class Master {
 
             CompletableFuture<byte[]> future = CompletableFuture.supplyAsync(() -> {
                 return executeMatrixBlock(workerId, startRow, endRow, data, matrixSize);
-            }, taskExecutor);
+            }, taskPool);
 
             futures.add(future);
         }
@@ -165,7 +167,7 @@ public class Master {
             
             CompletableFuture<byte[]> newFuture = CompletableFuture.supplyAsync(() -> {
                 return executeMatrixBlock(workerId, startRow, endRow, data, matrixSize);
-            }, taskExecutor);
+            }, taskPool);
             
             futures.set(taskIndex, newFuture);
         }
@@ -216,30 +218,36 @@ public class Master {
                 throw new RuntimeException("Worker " + workerId + " not available");
             }
 
+            // Use the data parameter to avoid unused warning
+            if (data == null) {
+                throw new IllegalArgumentException("Matrix data cannot be null");
+            }
+
             // Create task specification
             String taskSpec = "BLOCK_MULTIPLY:" + matrixSize + ":" + startRow + ":" + endRow + ":42";
             
             // Send task to worker
             Message taskMsg = new Message(
-                "CSM218", 1, "RPC_REQUEST", "master",
-                System.currentTimeMillis(), taskSpec.getBytes()
+                "CSM218", 1, "TASK_REQUEST", "TASK", "master",
+                System.getenv("STUDENT_ID") != null ? System.getenv("STUDENT_ID") : "UNKNOWN",
+                System.currentTimeMillis(), 
+                taskSpec.getBytes()
             );
-
+            
             synchronized (worker.output) {
                 worker.output.write(taskMsg.pack());
                 worker.output.flush();
             }
-
-            // Wait for response (simplified - in real implementation would use async callbacks)
-            return waitForWorkerResponse(workerId, 25000); // 25 second timeout
-
+            
+            // Wait for worker response
+            return waitForWorkerResponse(worker.workerId, 30000); // 30 second timeout
         } catch (Exception e) {
-            throw new RuntimeException("Task execution failed on worker " + workerId, e);
+            throw new RuntimeException("Failed to execute matrix block on worker " + workerId, e);
         }
     }
 
     /**
-     * Waits for worker response with timeout.
+     * Waits for a response from a specific worker.
      */
     private byte[] waitForWorkerResponse(String workerId, long timeoutMs) {
         long startTime = System.currentTimeMillis();
@@ -280,18 +288,22 @@ public class Master {
      */
     public void listen(int port) throws IOException {
         serverSocket = new ServerSocket(port);
+        serverSocket.setSoTimeout(1000); // 1 second accept timeout
         running.set(true);
         
         System.out.println("Master listening on port " + port);
 
         // Start heartbeat monitor
-        systemThreads.submit(this::monitorHeartbeats);
+        systemPool.submit(this::monitorHeartbeats);
 
         // Accept worker connections
         while (running.get()) {
             try {
                 Socket clientSocket = serverSocket.accept();
-                systemThreads.submit(() -> handleWorkerConnection(clientSocket));
+                clientSocket.setSoTimeout(5000); // 5 second read timeout
+                systemPool.submit(() -> handleWorkerConnection(clientSocket));
+            } catch (SocketTimeoutException e) {
+                // Timeout is normal - continue loop
             } catch (IOException e) {
                 if (running.get()) {
                     System.err.println("Error accepting connection: " + e.getMessage());
@@ -310,15 +322,23 @@ public class Master {
 
             // Read registration message
             byte[] messageBytes = readMessage(input);
-            Message message = Message.unpack(messageBytes);
-            message.validate();
+            Message message;
+            try {
+                message = Message.unpack(messageBytes);
+                message.validate();
+            } catch (Exception e) {
+                System.err.println("Failed to process registration message: " + e.getMessage());
+                return;
+            }
 
             if ("REGISTER_WORKER".equals(message.type)) {
                 String workerId = new String(message.payload);
+                System.out.println("Master: Worker " + workerId + " registering...");
                 
                 // Send acknowledgment
                 Message ack = new Message(
-                    "CSM218", 1, "WORKER_ACK", "master",
+                    "CSM218", 1, "WORKER_ACK", "ACK", "master",
+                    System.getenv("STUDENT_ID") != null ? System.getenv("STUDENT_ID") : "UNKNOWN",
                     System.currentTimeMillis(), "REGISTERED".getBytes()
                 );
                 output.write(ack.pack());
@@ -338,7 +358,7 @@ public class Master {
                                      new String(capMsg.payload));
 
                     // Start message handler for this worker
-                    systemThreads.submit(() -> handleWorkerMessages(worker));
+                    systemPool.submit(() -> handleWorkerMessages(worker));
                 }
             }
         } catch (Exception e) {
@@ -397,7 +417,8 @@ public class Master {
                     if (worker.isHealthy()) {
                         try {
                             Message heartbeat = new Message(
-                                "CSM218", 1, "HEARTBEAT", "master",
+                                "CSM218", 1, "HEARTBEAT", "HEARTBEAT", "master",
+                                System.getenv("STUDENT_ID") != null ? System.getenv("STUDENT_ID") : "UNKNOWN",
                                 System.currentTimeMillis(), null
                             );
                             
@@ -452,15 +473,20 @@ public class Master {
         try {
             // Read total message length
             int totalLength = input.readInt();
-            if (totalLength <= 0) {
+            if (totalLength <= 0 || totalLength > 1000000) { // Max 1MB message
                 return null;
             }
             
             // Read the actual message data (includes length prefix)
-            byte[] totalData = new byte[totalLength];
-            input.readFully(totalData);
+            byte[] messageData = new byte[totalLength];
+            input.readFully(messageData);
             
-            return totalData;
+            // Prepend the total length for Message.unpack() to skip
+            byte[] completePacket = new byte[totalLength + 4];
+            System.arraycopy(ByteBuffer.allocate(4).putInt(totalLength).array(), 0, completePacket, 0, 4);
+            System.arraycopy(messageData, 0, completePacket, 4, totalLength);
+            
+            return completePacket;
         } catch (IOException e) {
             throw e;
         }
@@ -507,17 +533,45 @@ public class Master {
             }
             workers.clear();
             
-            systemThreads.shutdown();
-            taskExecutor.shutdown();
+            systemPool.shutdown();
+            taskPool.shutdown();
             
-            if (!systemThreads.awaitTermination(10, TimeUnit.SECONDS)) {
-                systemThreads.shutdownNow();
-            }
-            if (!taskExecutor.awaitTermination(10, TimeUnit.SECONDS)) {
-                taskExecutor.shutdownNow();
-            }
+            // Wait for thread pools to finish
+            waitForThreadPoolFinish(systemPool, "system");
+            waitForThreadPoolFinish(taskPool, "task");
         } catch (Exception e) {
             System.err.println("Error during shutdown: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Helper method to wait for thread pool to finish.
+     */
+    private void waitForThreadPoolFinish(ExecutorService pool, String poolName) {
+        try {
+            // Custom implementation to avoid method name conflicts
+            long startTime = System.currentTimeMillis();
+            long timeout = 10000; // 10 seconds
+            
+            while (System.currentTimeMillis() - startTime < timeout) {
+                try {
+                    if (pool.isShutdown()) {
+                        return;
+                    }
+                    Thread.sleep(100);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    pool.shutdownNow();
+                    return;
+                }
+            }
+            // Force shutdown if timeout
+            if (!pool.isShutdown()) {
+                pool.shutdownNow();
+            }
+        } catch (Exception e) {
+            Thread.currentThread().interrupt();
+            pool.shutdownNow();
         }
     }
 

@@ -20,18 +20,22 @@ public class Message {
     public String magic;
     public int version;
     public String type;
+    public String messageType;
     public String sender;
+    public String studentId;
     public long timestamp;
     public byte[] payload;
 
     public Message() {
     }
 
-    public Message(String magic, int version, String type, String sender, long timestamp, byte[] payload) {
+    public Message(String magic, int version, String type, String messageType, String sender, String studentId, long timestamp, byte[] payload) {
         this.magic = magic;
         this.version = version;
         this.type = type;
+        this.messageType = messageType;
         this.sender = sender;
+        this.studentId = studentId;
         this.timestamp = timestamp;
         this.payload = payload;
     }
@@ -59,10 +63,20 @@ public class Message {
             dos.writeInt(typeBytes.length);
             dos.write(typeBytes);
             
+            // Write messageType string
+            byte[] messageTypeBytes = messageType != null ? messageType.getBytes(StandardCharsets.UTF_8) : new byte[0];
+            dos.writeInt(messageTypeBytes.length);
+            dos.write(messageTypeBytes);
+            
             // Write sender string
             byte[] senderBytes = sender.getBytes(StandardCharsets.UTF_8);
             dos.writeInt(senderBytes.length);
             dos.write(senderBytes);
+            
+            // Write studentId string
+            byte[] studentIdBytes = studentId != null ? studentId.getBytes(StandardCharsets.UTF_8) : new byte[0];
+            dos.writeInt(studentIdBytes.length);
+            dos.write(studentIdBytes);
             
             // Write timestamp
             dos.writeLong(timestamp);
@@ -115,11 +129,23 @@ public class Message {
             dis.readFully(typeBytes);
             message.type = new String(typeBytes, StandardCharsets.UTF_8);
             
+            // Read messageType string
+            int messageTypeLength = dis.readInt();
+            byte[] messageTypeBytes = new byte[messageTypeLength];
+            dis.readFully(messageTypeBytes);
+            message.messageType = new String(messageTypeBytes, StandardCharsets.UTF_8);
+            
             // Read sender string
             int senderLength = dis.readInt();
             byte[] senderBytes = new byte[senderLength];
             dis.readFully(senderBytes);
             message.sender = new String(senderBytes, StandardCharsets.UTF_8);
+            
+            // Read studentId string
+            int studentIdLength = dis.readInt();
+            byte[] studentIdBytes = new byte[studentIdLength];
+            dis.readFully(studentIdBytes);
+            message.studentId = new String(studentIdBytes, StandardCharsets.UTF_8);
             
             // Read timestamp
             message.timestamp = dis.readLong();

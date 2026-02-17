@@ -4,6 +4,8 @@ import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
 import java.net.Socket;
+import java.net.InetSocketAddress;
+import java.nio.ByteBuffer;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -38,14 +40,17 @@ public class Worker {
      */
     public void joinCluster() {
         try {
-            // Establish connection to master
-            masterConnection = new Socket(masterHost, masterPort);
+            // Establish connection to master with timeout
+            masterConnection = new Socket();
+            masterConnection.connect(new InetSocketAddress(masterHost, masterPort), 3000); // 3 second timeout
+            masterConnection.setSoTimeout(5000); // 5 second read timeout
             input = new DataInputStream(masterConnection.getInputStream());
             output = new DataOutputStream(masterConnection.getOutputStream());
             
             // Send registration message
             Message registerMsg = new Message(
-                "CSM218", 1, "REGISTER_WORKER", workerId, 
+                "CSM218", 1, "REGISTER_WORKER", "REGISTRATION", workerId, 
+                System.getenv("STUDENT_ID") != null ? System.getenv("STUDENT_ID") : "UNKNOWN", 
                 System.currentTimeMillis(), 
                 workerId.getBytes()
             );
@@ -57,15 +62,21 @@ public class Worker {
             Message response = Message.unpack(responseBytes);
             response.validate();
             
+            // Enhanced handshake validation
+            if (!"CSM218".equals(response.magic) || response.version != 1) {
+                throw new IOException("Protocol version mismatch");
+            }
+            
             if ("WORKER_ACK".equals(response.type)) {
                 System.out.println("Worker " + workerId + " registered successfully");
                 running.set(true);
                 
-                // Send capability announcement
+                // Send enhanced capability announcement with protocol info
                 Message capabilityMsg = new Message(
-                    "CSM218", 1, "REGISTER_CAPABILITIES", workerId,
+                    "CSM218", 1, "REGISTER_CAPABILITIES", "CAPABILITY", workerId,
+                    System.getenv("STUDENT_ID") != null ? System.getenv("STUDENT_ID") : "UNKNOWN",
                     System.currentTimeMillis(),
-                    "MATRIX_MULTIPLICATION:4".getBytes() // 4 concurrent threads
+                    ("MATRIX_MULTIPLICATION:4:PROTOCOL_V2:ENHANCED_HANDSHAKE").getBytes()
                 );
                 output.write(capabilityMsg.pack());
                 output.flush();
@@ -83,6 +94,17 @@ public class Worker {
     }
 
     /**
+     * Starts the worker's main processing loop.
+     */
+    public void execute() {
+        if (!running.get()) {
+            System.err.println("Worker not connected. Call joinCluster() first.");
+            return;
+        }
+        run();
+    }
+
+    /**
      * Main event loop for processing messages from master.
      */
     private void run() {
@@ -96,7 +118,7 @@ public class Worker {
                 
                 // Handle different message types
                 switch (message.type) {
-                    case "RPC_REQUEST":
+                    case "TASK_REQUEST":
                         handleTaskRequest(message);
                         break;
                     case "HEARTBEAT":
@@ -127,7 +149,8 @@ public class Worker {
                 
                 // Send result back to master
                 Message response = new Message(
-                    "CSM218", 1, "TASK_COMPLETE", workerId,
+                    "CSM218", 1, "TASK_COMPLETE", "RESULT", workerId,
+                    System.getenv("STUDENT_ID") != null ? System.getenv("STUDENT_ID") : "UNKNOWN",
                     System.currentTimeMillis(), result
                 );
                 
@@ -139,7 +162,8 @@ public class Worker {
             } catch (Exception e) {
                 // Send error response
                 Message errorResponse = new Message(
-                    "CSM218", 1, "TASK_ERROR", workerId,
+                    "CSM218", 1, "TASK_ERROR", "ERROR", workerId,
+                    System.getenv("STUDENT_ID") != null ? System.getenv("STUDENT_ID") : "UNKNOWN",
                     System.currentTimeMillis(), 
                     e.getMessage().getBytes()
                 );
@@ -257,7 +281,8 @@ public class Worker {
     private void handleHeartbeat(Message heartbeat) {
         try {
             Message heartbeatResponse = new Message(
-                "CSM218", 1, "HEARTBEAT_ACK", workerId,
+                "CSM218", 1, "HEARTBEAT_ACK", "HEARTBEAT", workerId,
+                System.getenv("STUDENT_ID") != null ? System.getenv("STUDENT_ID") : "UNKNOWN",
                 System.currentTimeMillis(), null
             );
             
@@ -275,17 +300,22 @@ public class Worker {
      */
     private byte[] readMessage() throws IOException {
         try {
-            // Read total message length
-            int totalLength = input.readInt();
-            if (totalLength <= 0) {
+            // Read message length with timeout
+            int length = input.readInt();
+            if (length <= 0 || length > 1000000) { // Max 1MB message
                 return null;
             }
             
-            // Read the actual message data (includes length prefix)
-            byte[] totalData = new byte[totalLength];
-            input.readFully(totalData);
+            // Read message data
+            byte[] messageData = new byte[length];
+            input.readFully(messageData);
             
-            return totalData;
+            // Prepend the total length for Message.unpack() to skip
+            byte[] completePacket = new byte[length + 4];
+            System.arraycopy(ByteBuffer.allocate(4).putInt(length).array(), 0, completePacket, 0, 4);
+            System.arraycopy(messageData, 0, completePacket, 4, length);
+            
+            return completePacket;
         } catch (IOException e) {
             running.set(false);
             throw e;
