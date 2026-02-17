@@ -1,0 +1,40 @@
+import pdc.Worker;
+import pdc.Master;
+
+public class TestRunner {
+    public static void main(String[] args) {
+        System.out.println("=== Running All Tests ===");
+        
+        // Run Integration Tests
+        System.out.println("\n--- Integration Tests ---");
+        runIntegrationTests();
+        
+        System.out.println("\n=== All Tests Completed ===");
+    }
+    
+    private static void runIntegrationTests() {
+        System.out.println("Testing Worker-Master Integration...");
+        
+        try {
+            // Test Worker creation and basic functionality
+            Worker worker = new Worker("test-worker", "localhost", 9999);
+            System.out.println("✅ Worker created successfully");
+            
+            // Test Master creation and basic functionality
+            Master master = new Master();
+            System.out.println("✅ Master created successfully");
+            
+            // Test Master coordinate method
+            int[][] matrix = { { 1, 2 }, { 3, 4 } };
+            try {
+                Object result = master.coordinate("BLOCK_MULTIPLY", matrix, 1);
+                System.out.println("✅ Master coordinate test completed");
+            } catch (IllegalStateException e) {
+                System.out.println("✅ Master coordinate test passed (expected no workers)");
+            }
+            
+        } catch (Exception e) {
+            System.out.println("❌ Integration test failed: " + e.getMessage());
+        }
+    }
+}
