@@ -137,18 +137,24 @@ public class Master {
      */
     private int[][] handleStragglers(List<CompletableFuture<byte[]>> futures, int[][] data, 
                                    int matrixSize, int blockSize) {
-        System.out.println("Handling stragglers - reassigning incomplete tasks...");
+        System.out.println("Handling stragglers and failures - reassigning incomplete or failed tasks...");
         
-        // Find incomplete tasks
-        List<Integer> incompleteTasks = new ArrayList<>();
+        // Find incomplete or failed tasks
+        List<Integer> tasksToReassign = new ArrayList<>();
         for (int i = 0; i < futures.size(); i++) {
-            if (!futures.get(i).isDone()) {
-                incompleteTasks.add(i);
+            CompletableFuture<byte[]> future = futures.get(i);
+            if (!future.isDone() || future.isCompletedExceptionally()) {
+                tasksToReassign.add(i);
+                if (future.isCompletedExceptionally()) {
+                    System.out.println("Task " + i + " failed, marking for reassignment.");
+                } else {
+                    System.out.println("Task " + i + " is a straggler, marking for reassignment.");
+                }
             }
         }
 
-        if (incompleteTasks.isEmpty()) {
-            // All tasks completed, proceed with aggregation
+        if (tasksToReassign.isEmpty()) {
+            // All tasks completed successfully, proceed with aggregation
             return aggregateResults(futures, matrixSize, blockSize);
         }
 
@@ -159,7 +165,7 @@ public class Master {
             throw new RuntimeException("No healthy workers available for task reassignment");
         }
 
-        for (int taskIndex : incompleteTasks) {
+        for (int taskIndex : tasksToReassign) {
             String workerId = healthyWorkers.get(taskIndex % healthyWorkers.size());
             int startRow = taskIndex * blockSize;
             int endRow = Math.min((taskIndex + 1) * blockSize, matrixSize);
@@ -179,10 +185,10 @@ public class Master {
             CompletableFuture<Void> allReassignedTasks = CompletableFuture.allOf(
                 futures.toArray(new CompletableFuture[0])
             );
-            allReassignedTasks.get(15, TimeUnit.SECONDS);
+            allReassignedTasks.get(15, TimeUnit.SECONDS); // Shorter timeout for retries
             return aggregateResults(futures, matrixSize, blockSize);
         } catch (Exception e) {
-            throw new RuntimeException("Failed to complete even after reassignment", e);
+            throw new RuntimeException("Failed to complete tasks even after reassignment", e);
         }
     }
 
