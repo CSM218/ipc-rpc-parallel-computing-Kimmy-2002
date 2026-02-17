@@ -1,0 +1,63 @@
+package pdc;
+
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.AfterEach;
+import static org.junit.jupiter.api.Assertions.*;
+
+/**
+ * JUnit 5 tests for Worker class.
+ * Tests worker lifecycle and asynchronous behaviors.
+ */
+class WorkerTest {
+
+    private Worker worker;
+
+    @BeforeEach
+    void setUp() {
+        worker = new Worker("test-worker", "localhost", 9999);
+    }
+
+    @AfterEach
+    void tearDown() {
+        if (worker != null) {
+            worker.stop();
+        }
+    }
+
+    @Test
+    void testWorker_Join_Logic() {
+        assertDoesNotThrow(() -> {
+            // Should attempt to connect but handle failures gracefully
+            worker.joinCluster();
+        }, "Worker join logic should handle network absence gracefully");
+    }
+
+    @Test
+    void testWorker_Execute_Invocation() {
+        assertDoesNotThrow(() -> {
+            worker.start();
+            // Let it run briefly
+            try {
+                Thread.sleep(100);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            worker.stop();
+        }, "Worker execute should be a non-blocking invocation of processing loop");
+    }
+
+    @Test
+    void testWorker_Stop_Mechanism() {
+        assertDoesNotThrow(() -> {
+            worker.start();
+            // Let it run briefly
+            try {
+                Thread.sleep(100);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            worker.stop();
+        }, "Worker stop mechanism should terminate cleanly");
+    }
+}
